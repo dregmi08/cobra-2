@@ -1,0 +1,29 @@
+name: Autograding Tests
+'on':
+- push
+- repository_dispatch
+permissions:
+  checks: write
+  actions: read
+  contents: read
+jobs:
+  run-autograding-tests:
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-classroom[bot]'
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Only cargo build && cargo test
+      id: only-cargo-build-cargo-test
+      uses: classroom-resources/autograding-command-grader@v1
+      with:
+        test-name: Only cargo build && cargo test
+        setup-command: cargo build
+        command: cargo test -- --test-threads 1
+        timeout: 3
+    - name: Autograding Reporter
+      uses: classroom-resources/autograding-grading-reporter@v1
+      env:
+        ONLY-CARGO-BUILD-CARGO-TEST_RESULTS: "${{steps.only-cargo-build-cargo-test.outputs.result}}"
+      with:
+        runners: only-cargo-build-cargo-test
