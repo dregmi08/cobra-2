@@ -132,12 +132,12 @@ fn compile(name: &str, file: &str, input: Option<&str>) -> Result<(String, Strin
         return Err(SnekError::Aot(String::from_utf8(output_c.stderr).unwrap()));
     }
 
-    let output_e = Command::new(&boa_path)
-        .arg("-e")
-        .arg(&mk_path(file, Ext::Snek))
-        .arg(input.unwrap_or(""))
-        .output()
-        .expect("could not run the compiler");
+    let mut cmd_e = Command::new(&boa_path);
+    cmd_e.arg("-e").arg(&mk_path(file, Ext::Snek));
+    if let Some(inp) = input {
+        cmd_e.arg(inp);
+    }
+    let output_e = cmd_e.output().expect("could not run the compiler");
     if !output_e.status.success() {
         return Err(SnekError::Jit(String::from_utf8(output_e.stderr).unwrap()));
     }
@@ -224,66 +224,71 @@ macro_rules! repl_tests {
 pub(crate) fn run_repl_sequence_test(name: &str, commands: &[&str], expected_outputs: &[&str]) {
     let actual_outputs = run_repl_with_timeout(commands, 3000);
 
-    // Parse outputs
-    let actual_lines = parse_repl_output(&actual_outputs);
-    let actual_vec: Vec<&str> = actual_lines.iter().map(|s| s.trim()).collect();
-
-    // For each expected_outputs entry, allow comma-separated substrings, and pass if all are found in the corresponding actual output
-    let mut mismatch = false;
-    for (i, expected) in expected_outputs.iter().enumerate() {
+    let mut current_pos = 0;
+    let mut found_outputs = Vec::new();
+    
+    for expected in expected_outputs {
         let expected_subs: Vec<&str> = expected.split(',').map(|s| s.trim()).collect();
-        let actual = actual_vec.get(i).unwrap_or(&"");
-        let all_found = expected_subs.iter().all(|sub| actual.contains(sub));
-        if !all_found {
-            eprintln!(
-                "Mismatch at index {}: expected substrings {:?} not all found in actual '{}'.\nFull raw output:\n{}",
-                i, expected_subs, actual, actual_outputs
+        
+        // Linear scan
+        let remaining = &actual_outputs[current_pos..];
+        let mut search_pos = 0;
+        let mut match_start = None;
+        let mut match_end = None;
+        
+        let mut all_found = true;
+        for (i, sub) in expected_subs.iter().enumerate() {
+            if let Some(pos) = remaining[search_pos..].find(sub) {
+                let absolute_pos = search_pos + pos;
+                if i == 0 {
+                    match_start = Some(absolute_pos);
+                }
+                search_pos = absolute_pos + sub.len();
+                if i == expected_subs.len() - 1 {
+                    match_end = Some(search_pos);
+                }
+            } else {
+                all_found = false;
+                break;
+            }
+        }
+        
+        if all_found {
+            if let (Some(start), Some(end)) = (match_start, match_end) {
+                let matched_content = remaining[start..end].trim().to_string();
+                found_outputs.push(matched_content);
+                current_pos = current_pos + end;
+            } else {
+                eprintln!("[repl_test] Internal error extracting match for {:?}\nFull output:\n{}", expected_subs, actual_outputs);
+                panic!("Test '{}' failed: internal error extracting match", name);
+            }
+        } else {
+            let expected_str = format!("{:?}", expected_outputs);
+            let actual_str = format!("{:?}", found_outputs);
+            let expected_joined = expected_outputs.join("\n");
+            let actual_joined = found_outputs.join("\n");
+            eprintln!("\n[repl_test] MISMATCH\nExpected vector: {}\nActual vector:{}\n\nString diff:\n{}\n\nFull output:\n{}\n",
+                expected_str,
+                actual_str,
+                prettydiff::diff_lines(&actual_joined, &expected_joined),
+                actual_outputs
             );
-            mismatch = true;
+            panic!("Test '{}' failed: expected substrings {:?} not found in order in output", name, expected_subs);
         }
     }
-    if mismatch {
-        panic!(
-            "Vector mismatch in test '{}'\nExpected substrings: {:?}\nActual vector:   {:?}\n\nFull raw output:\n{}",
-            name, expected_outputs, actual_vec, actual_outputs
-        );
-    }
+    println!("[repl_test] Success!\nExpected vector: {:?}\nActual vector:   {:?}\n", expected_outputs, found_outputs);
 }
 
 
 
-fn parse_repl_output(raw_output: &str) -> Vec<String> {
-    let lines: Vec<&str> = raw_output.lines().collect();
-    let mut actual_lines = Vec::new();
-    
-    for i in 0..lines.len() {
-        let line = lines[i].trim();
-        
-        // Result on same line as > for some reason
-        if line.starts_with("> ") && line.len() > 2 {
-            let mut result = line[2..].trim();
-            // Sometimes skip result (with define)
-            while result.starts_with("> ") && result.len() > 2 {
-                result = result[2..].trim();
-            }
-            if !result.is_empty() && result != ">" {
-                actual_lines.push(result.to_string());
-                continue;
-            }
-        }
-        
-    }
-    
-    actual_lines
-}
 
 
 fn run_repl_with_timeout(commands: &[&str], timeout_ms: u64) -> String {
     // Probably dont need this for autograder
     let boa_path = if cfg!(target_os = "macos") {
-        "target/x86_64-apple-darwin/debug/boa"
+        "target/x86_64-apple-darwin/debug/cobra"
     } else {
-        "target/debug/boa"
+        "target/debug/cobra"
     };
 
     let mut child = Command::new(boa_path)
@@ -316,4 +321,3 @@ fn run_repl_with_timeout(commands: &[&str], timeout_ms: u64) -> String {
     let output = child.wait_with_output().expect("failed to read output");
     String::from_utf8_lossy(&output.stdout).to_string()
 }
-

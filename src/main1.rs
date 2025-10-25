@@ -1,4 +1,3 @@
-
 use std::env; 
 use std::fs::File;
 use std::io::prelude::*;
@@ -10,15 +9,27 @@ use std::io::{self, Write};
 use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi, DynamicLabel};
 
 
+/*#[link(name = "our_code")]
+extern "C" {
+    // The \x01 here is an undocumented feature of LLVM that ensures
+    // it does not add an underscore in front of the name.
+    // Courtesy of Max New (https://maxsnew.com/teaching/eecs-483-fa22/hw_adder_assignment.html)
+    #[link_name = "\x01our_code_starts_here"]
+    fn our_code_starts_here(input: u64) -> u64;
+}*/
+
+//#[export_name = "\x01snek_error"]
 #[no_mangle]
 pub extern "C" fn snek_error(errcode: i64) {
-    match errcode {
-        1 => eprintln!("invalid argument"),
-        2 => eprintln!("overflow"),
-        _ => eprintln!("an error occurred {}", errcode),
-    }
+    eprintln!("an error ocurred {errcode}");
     std::process::exit(1);
 }
+
+/*pub extern "C" fn snek_error(errcode: i64) {
+    // TODO: print error message according to writeup
+    eprintln!("an error ocurred {errcode}");
+    std::process::exit(1);
+}*/
 
 enum Op1 { Add1, 
     Sub1,
@@ -34,7 +45,7 @@ enum Expr {
     Id(String),
     Let(Vec<(String, Expr)>, Box<Expr>),
     UnOp(Op1, Box<Expr>),
-    BinOp(Op2, Box<Expr>, Box<Expr>),
+    BinOp(Op2, Box<Expr>, Box<Expr>), //done up to here
     If(Box<Expr>, Box<Expr>, Box<Expr>),
     Loop(Box<Expr>),
     Break(Box<Expr>),
@@ -42,6 +53,7 @@ enum Expr {
     Block(Vec<Expr>),
     Define(String, Box<Expr>),
 }
+
 
 //USED CLAUDE: to figure out how to write the syntax for iterating through the List returned by
 //sexp::parse and parsing for the block case
@@ -139,6 +151,7 @@ fn parse_bind(bindings: &Vec<Sexp>, define_cnt: &mut i64, flag: &String) -> Vec<
     }).collect()
 }
 
+
 //CLAUDE to help refactor repl to look much cleaner
 //Prompt: Given this main code, could you refactor to look cleaner?
 fn main() -> std::io::Result<()> {
@@ -171,13 +184,12 @@ fn main() -> std::io::Result<()> {
             let define_env = HashMap::new();
             let result = compile_expr(&expr, 2, &env, &define_env, &None);
             let asm_program = format!("
-section .text
-extern snek_error
-global our_code_starts_here
-our_code_starts_here:
-{}
-ret
-", result);
+        section .text
+        global our_code_starts_here
+        our_code_starts_here:
+        {}
+        ret
+        ", result);
             let mut out_file = File::create(out_name)?;
             out_file.write_all(asm_program.as_bytes())?;
         }
@@ -250,13 +262,12 @@ ret
             let define_env = HashMap::new();
             let result = compile_expr(&expr, 2, &env, &define_env, &None);
             let asm_program = format!("
-section .text
-extern snek_error
-global our_code_starts_here
-our_code_starts_here:
-{}
-ret
-", result);
+        section .text
+        global our_code_starts_here
+        our_code_starts_here:
+        {}
+        ret
+        ", result);
             let mut out_file = File::create(out_name)?;
             out_file.write_all(asm_program.as_bytes())?;
             
@@ -323,10 +334,10 @@ fn parse_input(input: &str) -> i64 {
     }
 }
 
-
 //Claude usage: I used Claude to correct assembly at certain points: periodically
 //Prompts were comething like this: My code doesn't work in this particular case {test}, could you
 //advise me as to where I went wrong
+
 fn compile_expr(e: &Expr, si: i32, env: &HashMap<String, i32>, define_env: &HashMap<String, i64>, break_target: &Option<String>) -> String {
     match e {
         Expr::Number(n) => {
@@ -352,254 +363,168 @@ fn compile_expr(e: &Expr, si: i32, env: &HashMap<String, i32>, define_env: &Hash
         }
         Expr::UnOp(Op1::Add1, subexpr) => {
             let e_instrs = compile_expr(subexpr, si, env, define_env, break_target);
-            format!("{}
-test rax, 1
-jz add1_ok
-mov rdi, 1
-call snek_error
-add1_ok:
-add rax, 2
-jo overflow_add1
-jmp add1_done
-overflow_add1:
-mov rdi, 2
-call snek_error
-add1_done:", e_instrs)
+            format!("{}\ntest rax, 1\njnz snek_error\nadd rax, 2", e_instrs)
         }
         Expr::UnOp(Op1::Sub1, subexpr) => {
             let e_instrs = compile_expr(subexpr, si, env, define_env, break_target);
-            format!("{}
-test rax, 1
-jz sub1_ok
-mov rdi, 1
-call snek_error
-sub1_ok:
-sub rax, 2
-jo overflow_sub1
-jmp sub1_done
-overflow_sub1:
-mov rdi, 2
-call snek_error
-sub1_done:", e_instrs)
+            format!("{}\ntest rax, 1\njnz snek_error\nsub rax, 2", e_instrs)
         }
         Expr::UnOp(Op1::IsNum, subexpr) => {
             let e_instrs = compile_expr(subexpr, si, env, define_env, break_target);
-            let stack_offset = si * 8;
-            format!("{}
-test rax, 1
-mov QWORD [rsp - {}], 1
-mov rax, 3
-cmovz rax, [rsp - {}]", e_instrs, stack_offset, stack_offset)
+            format!("{}\ntest rax, 1\nmov rbx, 1\nmov rcx, 3\ncmovz rax, rcx\ncmovnz rax, rbx", e_instrs)
         }
         Expr::UnOp(Op1::IsBool, subexpr) => {
             let e_instrs = compile_expr(subexpr, si, env, define_env, break_target);
-            let stack_offset = si * 8;
-            format!("{}
-test rax, 1
-mov QWORD [rsp - {}], 1
-mov rax, 3
-cmovnz rax, [rsp - {}]", e_instrs, stack_offset, stack_offset)
+            format!("{}\ntest rax, 1\nmov rbx, 1\nmov rcx, 3\ncmovnz rax, rcx\ncmovz rax, rbx", e_instrs)
         }
         Expr::BinOp(Op2::Plus, e1, e2) => {
             let expr1_instrs = compile_expr(e1, si, env, define_env, break_target);
             let expr2_instrs = compile_expr(e2, si+1, env, define_env, break_target);
             let stack_offset = si*8;
-            format!("{}
-test rax, 1
-jz plus_e1_ok
-mov rdi, 1
-call snek_error
-plus_e1_ok:
-mov [rsp - {}], rax
-{}
-test rax, 1
-jz plus_e2_ok
-mov rdi, 1
-call snek_error
-plus_e2_ok:
-add rax, [rsp - {}]
-jo overflow_plus
-jmp plus_done
-overflow_plus:
-mov rdi, 2
-call snek_error
-plus_done:", expr1_instrs, stack_offset, expr2_instrs, stack_offset)
+            format!("
+               {expr1_instrs}
+               test rax, 1
+               jnz snek_error
+               mov [rsp - {stack_offset}], rax
+               {expr2_instrs}
+               test rax, 1
+               jnz snek_error
+               add rax, [rsp - {stack_offset}]
+               jo snek_error
+            ")
         }
         Expr::BinOp(Op2::Minus, e1, e2) => {
             let expr1_instrs = compile_expr(e1, si, env, define_env, break_target);
             let expr2_instrs = compile_expr(e2, si+1, env, define_env, break_target);
             let stack_offset = si*8;
-            let stack_offset2 = (si+1)*8;
-            format!("{}
-test rax, 1
-jz minus_e1_ok
-mov rdi, 1
-call snek_error
-minus_e1_ok:
-mov [rsp - {}], rax
-{}
-test rax, 1
-jz minus_e2_ok
-mov rdi, 1
-call snek_error
-minus_e2_ok:
-mov [rsp - {}], rax
-mov rax, [rsp - {}]
-sub rax, [rsp - {}]
-jo overflow_minus
-jmp minus_done
-overflow_minus:
-mov rdi, 2
-call snek_error
-minus_done:", expr1_instrs, stack_offset, expr2_instrs, stack_offset2, stack_offset, stack_offset2)
+            format!("
+               {expr1_instrs}
+               test rax, 1
+               jnz snek_error
+               mov [rsp - {stack_offset}], rax
+               {expr2_instrs}
+               test rax, 1
+               jnz snek_error
+               mov rbx, rax
+               mov rax, [rsp - {stack_offset}]
+               sub rax, rbx
+               jo snek_error
+            ")
         }
         Expr::BinOp(Op2::Times, e1, e2) => {
             let expr1_instrs = compile_expr(e1, si, env, define_env, break_target);
             let expr2_instrs = compile_expr(e2, si+1, env, define_env, break_target);
             let stack_offset = si*8;
-            format!("{}
-test rax, 1
-jz times_e1_ok
-mov rdi, 1
-call snek_error
-times_e1_ok:
-mov [rsp - {}], rax
-{}
-test rax, 1
-jz times_e2_ok
-mov rdi, 1
-call snek_error
-times_e2_ok:
-sar rax, 1
-imul rax, [rsp - {}]
-jo overflow_times
-jmp times_done
-overflow_times:
-mov rdi, 2
-call snek_error
-times_done:", expr1_instrs, stack_offset, expr2_instrs, stack_offset)
+            format!("
+               {expr1_instrs}
+               test rax, 1
+               jnz snek_error
+               mov [rsp - {stack_offset}], rax
+               {expr2_instrs}
+               test rax, 1
+               jnz snek_error
+               sar rax, 1
+               imul rax, [rsp - {stack_offset}]
+               jo snek_error
+            ")
         }
         Expr::BinOp(Op2::Equal, e1, e2) => {
             let expr1_instrs = compile_expr(e1, si, env, define_env, break_target);
             let expr2_instrs = compile_expr(e2, si+1, env, define_env, break_target);
             let stack_offset = si*8;
-            let stack_offset2 = (si+1)*8;
-            format!("{}
-mov [rsp - {}], rax
-{}
-mov [rsp - {}], rax
-mov rax, [rsp - {}]
-xor rax, [rsp - {}]
-test rax, 1
-jz equal_ok
-mov rdi, 1
-call snek_error
-equal_ok:
-mov rax, [rsp - {}]
-cmp rax, [rsp - {}]
-mov QWORD [rsp - {}], 1
-mov rax, 3
-cmove rax, [rsp - {}]", expr1_instrs, stack_offset, expr2_instrs, stack_offset2, stack_offset2, stack_offset, stack_offset2, stack_offset, stack_offset2, stack_offset2)
+            format!("
+               {expr1_instrs}
+               mov [rsp - {stack_offset}], rax
+               {expr2_instrs}
+               mov rbx, rax
+               xor rbx, [rsp - {stack_offset}]
+               test rbx, 1
+               jnz snek_error
+               cmp rax, [rsp - {stack_offset}]
+               mov rax, 1
+               mov rbx, 3
+               cmove rax, rbx
+            ")
         }
         Expr::BinOp(Op2::Greater, e1, e2) => {
             let expr1_instrs = compile_expr(e1, si, env, define_env, break_target);
             let expr2_instrs = compile_expr(e2, si+1, env, define_env, break_target);
             let stack_offset = si*8;
-            let stack_offset2 = (si+1)*8;
-            format!("{}
-test rax, 1
-jz greater_e1_ok
-mov rdi, 1
-call snek_error
-greater_e1_ok:
-mov [rsp - {}], rax
-{}
-test rax, 1
-jz greater_e2_ok
-mov rdi, 1
-call snek_error
-greater_e2_ok:
-mov [rsp - {}], rax
-mov rax, [rsp - {}]
-cmp rax, [rsp - {}]
-mov QWORD [rsp - {}], 1
-mov rax, 3
-cmovg rax, [rsp - {}]", expr1_instrs, stack_offset, expr2_instrs, stack_offset2, stack_offset, stack_offset2, stack_offset2, stack_offset2)
+            format!("
+               {expr1_instrs}
+               test rax, 1
+               jnz snek_error
+               mov [rsp - {stack_offset}], rax
+               {expr2_instrs}
+               test rax, 1
+               jnz snek_error
+               mov rbx, rax
+               mov rax, [rsp - {stack_offset}]
+               cmp rax, rbx
+               mov rax, 1
+               mov rbx, 3
+               cmovg rax, rbx
+            ")
         }
         Expr::BinOp(Op2::GreaterEqual, e1, e2) => {
             let expr1_instrs = compile_expr(e1, si, env, define_env, break_target);
             let expr2_instrs = compile_expr(e2, si+1, env, define_env, break_target);
             let stack_offset = si*8;
-            let stack_offset2 = (si+1)*8;
-            format!("{}
-test rax, 1
-jz greaterequal_e1_ok
-mov rdi, 1
-call snek_error
-greaterequal_e1_ok:
-mov [rsp - {}], rax
-{}
-test rax, 1
-jz greaterequal_e2_ok
-mov rdi, 1
-call snek_error
-greaterequal_e2_ok:
-mov [rsp - {}], rax
-mov rax, [rsp - {}]
-cmp rax, [rsp - {}]
-mov QWORD [rsp - {}], 1
-mov rax, 3
-cmovge rax, [rsp - {}]", expr1_instrs, stack_offset, expr2_instrs, stack_offset2, stack_offset, stack_offset2, stack_offset2, stack_offset2)
+            format!("
+               {expr1_instrs}
+               test rax, 1
+               jnz snek_error
+               mov [rsp - {stack_offset}], rax
+               {expr2_instrs}
+               test rax, 1
+               jnz snek_error
+               mov rbx, rax
+               mov rax, [rsp - {stack_offset}]
+               cmp rax, rbx
+               mov rax, 1
+               mov rbx, 3
+               cmovge rax, rbx
+            ")
         }
         Expr::BinOp(Op2::Less, e1, e2) => {
             let expr1_instrs = compile_expr(e1, si, env, define_env, break_target);
             let expr2_instrs = compile_expr(e2, si+1, env, define_env, break_target);
             let stack_offset = si*8;
-            let stack_offset2 = (si+1)*8;
-            format!("{}
-test rax, 1
-jz less_e1_ok
-mov rdi, 1
-call snek_error
-less_e1_ok:
-mov [rsp - {}], rax
-{}
-test rax, 1
-jz less_e2_ok
-mov rdi, 1
-call snek_error
-less_e2_ok:
-mov [rsp - {}], rax
-mov rax, [rsp - {}]
-cmp rax, [rsp - {}]
-mov QWORD [rsp - {}], 1
-mov rax, 3
-cmovl rax, [rsp - {}]", expr1_instrs, stack_offset, expr2_instrs, stack_offset2, stack_offset, stack_offset2, stack_offset2, stack_offset2)
+            format!("
+               {expr1_instrs}
+               test rax, 1
+               jnz snek_error
+               mov [rsp - {stack_offset}], rax
+               {expr2_instrs}
+               test rax, 1
+               jnz snek_error
+               mov rbx, rax
+               mov rax, [rsp - {stack_offset}]
+               cmp rax, rbx
+               mov rax, 1
+               mov rbx, 3
+               cmovl rax, rbx
+            ")
         }
         Expr::BinOp(Op2::LessEqual, e1, e2) => {
             let expr1_instrs = compile_expr(e1, si, env, define_env, break_target);
             let expr2_instrs = compile_expr(e2, si+1, env, define_env, break_target);
             let stack_offset = si*8;
-            let stack_offset2 = (si+1)*8;
-            format!("{}
-test rax, 1
-jz lessequal_e1_ok
-mov rdi, 1
-call snek_error
-lessequal_e1_ok:
-mov [rsp - {}], rax
-{}
-test rax, 1
-jz lessequal_e2_ok
-mov rdi, 1
-call snek_error
-lessequal_e2_ok:
-mov [rsp - {}], rax
-mov rax, [rsp - {}]
-cmp rax, [rsp - {}]
-mov QWORD [rsp - {}], 1
-mov rax, 3
-cmovle rax, [rsp - {}]", expr1_instrs, stack_offset, expr2_instrs, stack_offset2, stack_offset, stack_offset2, stack_offset2, stack_offset2)
+            format!("
+               {expr1_instrs}
+               test rax, 1
+               jnz snek_error
+               mov [rsp - {stack_offset}], rax
+               {expr2_instrs}
+               test rax, 1
+               jnz snek_error
+               mov rbx, rax
+               mov rax, [rsp - {stack_offset}]
+               cmp rax, rbx
+               mov rax, 1
+               mov rbx, 3
+               cmovle rax, rbx
+            ")
         }
         Expr::If(cond, thn, els) => {
             static mut IF_COUNTER: i32 = 0;
@@ -615,15 +540,15 @@ cmovle rax, [rsp - {}]", expr1_instrs, stack_offset, expr2_instrs, stack_offset2
             let els_instrs = compile_expr(els, si, env, define_env, break_target);
             
             format!("
-{}
-cmp rax, 1
-je {}
-{}
-jmp {}
-{}:
-{}
-{}:
-", cond_instrs, else_label, thn_instrs, end_label, else_label, els_instrs, end_label)
+               {}
+               cmp rax, 1
+               je {}
+               {}
+               jmp {}
+               {}:
+               {}
+               {}:
+            ", cond_instrs, else_label, thn_instrs, end_label, else_label, els_instrs, end_label)
         }
         Expr::Loop(body) => {
             static mut LOOP_COUNTER: i32 = 0;
@@ -637,11 +562,11 @@ jmp {}
             let body_instrs = compile_expr(body, si, env, define_env, &Some(end_label.clone()));
             
             format!("
-{}:
-{}
-jmp {}
-{}:
-", start_label, body_instrs, start_label, end_label)
+               {}:
+               {}
+               jmp {}
+               {}:
+            ", start_label, body_instrs, start_label, end_label)
         }
         Expr::Break(e) => {
             match break_target {
@@ -680,9 +605,9 @@ jmp {}
                 let binding_instrs = compile_expr(binding_expr, current_si, &new_env, define_env, break_target);
                 let stack_offset = current_si * 8;
                 instrs.push_str(&format!("
-{}
-mov [rsp - {}], rax
-", binding_instrs, stack_offset));
+                    {}
+                    mov [rsp - {}], rax
+                ", binding_instrs, stack_offset));
                 new_env.insert(var_name.clone(), stack_offset);
                 current_si += 1;
             }
@@ -699,7 +624,7 @@ mov [rsp - {}], rax
 
 
 
-// Track define variables - either known (immediate) or Unknown (pointer to heap)
+// Track define variables - either nown (immediate) or Unknown (pointer to heap)
 #[derive(Clone)]
 enum DefineValue {
     Known(i64),           // Direct immediate value
@@ -797,19 +722,6 @@ fn repl(flag: &String) -> io::Result<()> {
             _ => {}
         }
 
-        // Check if any existing Known define variables are being set! in this expression
-        // If so, promote them to Unknown
-        for (var_name, def_val) in define_env.iter_mut() {
-            if let DefineValue::Known(val) = def_val {
-                if is_set_in_expr(var_name, &expr) {
-                    // Promote to Unknown by allocating on heap
-                    let boxed = Box::new(*val);
-                    let ptr = Box::into_raw(boxed);
-                    *def_val = DefineValue::Unknown(ptr);
-                }
-            }
-        }
-
         // Check if this is a define statement and if the variable is set!
         let (is_define, var_name, will_be_set) = match &expr {
             Expr::Define(name, body) => (true, name.clone(), is_set_in_expr(name, body)),
@@ -828,7 +740,7 @@ fn repl(flag: &String) -> io::Result<()> {
         let mut ops = dynasmrt::x64::Assembler::new().unwrap();
         let start = ops.offset();
         let env = HashMap::new();
-
+        
         // Catch panics from compile_ops
         let compile_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             compile_ops(&expr, &mut ops, 2, &env, &define_env, None);
@@ -836,7 +748,7 @@ fn repl(flag: &String) -> io::Result<()> {
             ops.commit().unwrap();
             ops
         }));
-
+        
         let ops = match compile_result {
             Ok(assembled_ops) => assembled_ops,
             Err(e) => {
@@ -848,12 +760,12 @@ fn repl(flag: &String) -> io::Result<()> {
                 continue;
             }
         };
-
+        
         let reader = ops.reader();
         let buf = reader.lock();
         let jitted_fn: extern "C" fn() -> i64 = unsafe { mem::transmute(buf.ptr(start)) };
         let result = jitted_fn();
-
+       
         // Update define environment based on result
         match expr {
             Expr::Define(var, _) => {
@@ -869,16 +781,6 @@ fn repl(flag: &String) -> io::Result<()> {
             _ => {}
         }
 
-        // After execution, update any Unknown values back to Known if they weren't set
-        // This allows optimization in future prompts
-        for (var_name, def_val) in define_env.iter_mut() {
-            if let DefineValue::Unknown(ptr) = def_val {
-                let val = unsafe { **ptr };
-                // Convert back to Known for optimization in future prompts
-                *def_val = DefineValue::Known(val);
-            }
-        }
-
         // Output result
         let output = if result & 1 == 0 {
             format!("{}", result >> 1)
@@ -889,6 +791,7 @@ fn repl(flag: &String) -> io::Result<()> {
     }
     Ok(())
 }
+
 
 //CLAUDE USAGE: Used Claude to reformat function to check if types in binop are the same
 //Prmopt: Given the function, reformat function to be cleaner + reformat/correct rust syntax
@@ -932,7 +835,9 @@ fn compile_ops(
             dynasm!(ops ; .arch x64 ; mov rax, QWORD val);
         }
         Expr::Id(name) => {
-            if let Some(stack_offset) = env.get(name) {
+            if name == "input" {
+                dynasm!(ops ; .arch x64 ; mov rax, rdi);
+            } else if let Some(stack_offset) = env.get(name) {
                 dynasm!(ops ; .arch x64 ; mov rax, [rsp - *stack_offset]);
             } else if let Some(def_val) = define_env.get(name) {
                 match def_val {
@@ -942,13 +847,11 @@ fn compile_ops(
                     DefineValue::Unknown(ptr) => {
                         let ptr_val = *ptr as i64;
                         dynasm!(ops ; .arch x64
-                            ; mov r11, QWORD ptr_val
-                            ; mov rax, [r11]
+                            ; mov rax, QWORD ptr_val
+                            ; mov rax, [rax]
                         );
                     }
                 }
-            } else if name == "input" {
-                dynasm!(ops ; .arch x64 ; mov rax, rdi);
             } else {
                 panic!("Unbound variable identifier {}", name);
             }
@@ -962,7 +865,6 @@ fn compile_ops(
             compile_ops(e1, ops, si, env, define_env, break_label);
             let error_label = ops.new_dynamic_label();
             let ok_label = ops.new_dynamic_label();
-            let snek_error_addr = snek_error as i64;
             dynasm!(ops ; .arch x64
                 ; test rax, 1
                 ; jnz =>error_label
@@ -970,8 +872,8 @@ fn compile_ops(
                 ; jmp =>ok_label
                 ; =>error_label
                 ; mov rdi, 1
-                ; mov rax, QWORD snek_error_addr
-                ; call rax
+                ; mov rax, 60
+                ; syscall
                 ; =>ok_label
             );
         }
@@ -984,7 +886,6 @@ fn compile_ops(
             compile_ops(e1, ops, si, env, define_env, break_label);
             let error_label = ops.new_dynamic_label();
             let ok_label = ops.new_dynamic_label();
-            let snek_error_addr = snek_error as i64;
             dynasm!(ops ; .arch x64
                 ; test rax, 1
                 ; jnz =>error_label
@@ -992,8 +893,8 @@ fn compile_ops(
                 ; jmp =>ok_label
                 ; =>error_label
                 ; mov rdi, 1
-                ; mov rax, QWORD snek_error_addr
-                ; call rax
+                ; mov rax, 60
+                ; syscall
                 ; =>ok_label
             );
         }
@@ -1029,7 +930,6 @@ fn compile_ops(
             compile_ops(e1, ops, si, env, define_env, break_label);
             let stack_offset = si * 8;
             let error_label = ops.new_dynamic_label();
-            let snek_error_addr = snek_error as i64;
 
             dynasm!(ops ; .arch x64
                 ; test rax, 1
@@ -1050,8 +950,8 @@ fn compile_ops(
                 ; jmp =>ok_label
                 ; =>error_label
                 ; mov rdi, 1
-                ; mov rax, QWORD snek_error_addr
-                ; call rax
+                ; mov rax, 60
+                ; syscall
                 ; =>ok_label
             );
         }
@@ -1068,7 +968,6 @@ fn compile_ops(
             let stack_offset = si * 8;
             let stack_offset2 = (si + 1) * 8;
             let error_label = ops.new_dynamic_label();
-            let snek_error_addr = snek_error as i64;
 
             dynasm!(ops ; .arch x64
                 ; test rax, 1
@@ -1091,8 +990,8 @@ fn compile_ops(
                 ; jmp =>ok_label
                 ; =>error_label
                 ; mov rdi, 1
-                ; mov rax, QWORD snek_error_addr
-                ; call rax
+                ; mov rax, 60
+                ; syscall
                 ; =>ok_label
             );
         }
@@ -1108,7 +1007,6 @@ fn compile_ops(
             compile_ops(e1, ops, si, env, define_env, break_label);
             let stack_offset = si * 8;
             let error_label = ops.new_dynamic_label();
-            let snek_error_addr = snek_error as i64;
 
             dynasm!(ops ; .arch x64
                 ; test rax, 1
@@ -1130,8 +1028,8 @@ fn compile_ops(
                 ; jmp =>ok_label
                 ; =>error_label
                 ; mov rdi, 1
-                ; mov rax, QWORD snek_error_addr
-                ; call rax
+                ; mov rax, 60
+                ; syscall
                 ; =>ok_label
             );
         }
@@ -1154,7 +1052,6 @@ fn compile_ops(
             let error_label = ops.new_dynamic_label();
             let ok_label = ops.new_dynamic_label();
             let stack_offset2 = (si + 1) * 8;
-            let snek_error_addr = snek_error as i64;
             dynasm!(ops ; .arch x64
                 ; mov [rsp - stack_offset2], rax
                 ; xor rax, [rsp - stack_offset]
@@ -1168,8 +1065,8 @@ fn compile_ops(
                 ; jmp =>ok_label
                 ; =>error_label
                 ; mov rdi, 1
-                ; mov rax, QWORD snek_error_addr
-                ; call rax
+                ; mov rax, 60
+                ; syscall
                 ; =>ok_label
             );
         }
@@ -1186,7 +1083,6 @@ fn compile_ops(
             let stack_offset = si * 8;
             let stack_offset2 = (si + 1) * 8;
             let error_label = ops.new_dynamic_label();
-            let snek_error_addr = snek_error as i64;
 
             dynasm!(ops ; .arch x64
                 ; test rax, 1
@@ -1212,8 +1108,8 @@ fn compile_ops(
                 ; jmp =>ok_label
                 ; =>error_label
                 ; mov rdi, 1
-                ; mov rax, QWORD snek_error_addr
-                ; call rax
+                ; mov rax, 60
+                ; syscall
                 ; =>ok_label
             );
         }
@@ -1230,7 +1126,6 @@ fn compile_ops(
             let stack_offset = si * 8;
             let stack_offset2 = (si + 1) * 8;
             let error_label = ops.new_dynamic_label();
-            let snek_error_addr = snek_error as i64;
 
             dynasm!(ops ; .arch x64
                 ; test rax, 1
@@ -1256,8 +1151,8 @@ fn compile_ops(
                 ; jmp =>ok_label
                 ; =>error_label
                 ; mov rdi, 1
-                ; mov rax, QWORD snek_error_addr
-                ; call rax
+                ; mov rax, 60
+                ; syscall
                 ; =>ok_label
             );
         }
@@ -1274,7 +1169,6 @@ fn compile_ops(
             let stack_offset = si * 8;
             let stack_offset2 = (si + 1) * 8;
             let error_label = ops.new_dynamic_label();
-            let snek_error_addr = snek_error as i64;
 
             dynasm!(ops ; .arch x64
                 ; test rax, 1
@@ -1300,8 +1194,8 @@ fn compile_ops(
                 ; jmp =>ok_label
                 ; =>error_label
                 ; mov rdi, 1
-                ; mov rax, QWORD snek_error_addr
-                ; call rax
+                ; mov rax, 60
+                ; syscall
                 ; =>ok_label
             );
         }
@@ -1318,7 +1212,6 @@ fn compile_ops(
             let stack_offset = si * 8;
             let stack_offset2 = (si + 1) * 8;
             let error_label = ops.new_dynamic_label();
-            let snek_error_addr = snek_error as i64;
 
             dynasm!(ops ; .arch x64
                 ; test rax, 1
@@ -1344,11 +1237,12 @@ fn compile_ops(
                 ; jmp =>ok_label
                 ; =>error_label
                 ; mov rdi, 1
-                ; mov rax, QWORD snek_error_addr
-                ; call rax
+                ; mov rax, 60
+                ; syscall
                 ; =>ok_label
             );
         }
+        // ... rest of the match arms remain the same ...
         Expr::Let(bindings_vec, body) => {
             let mut new_env = env.clone();
             let mut current_si = si;
@@ -1413,8 +1307,8 @@ fn compile_ops(
                     DefineValue::Unknown(ptr) => {
                         let ptr_val = *ptr as i64;
                         dynasm!(ops ; .arch x64
-                            ; mov r11, QWORD ptr_val
-                            ; mov [r11], rax
+                            ; mov rcx, QWORD ptr_val
+                            ; mov [rcx], rax
                         );
                     }
                     DefineValue::Known(_) => {
@@ -1437,4 +1331,4 @@ fn is_keyword(name: &str) -> bool {
         "if" | "block" | "loop" | "break" | "set!" | "+" | "-" | "*" | "<" | ">" |
         ">=" | "<=" | "="
     )
-}
+} 

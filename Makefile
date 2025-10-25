@@ -15,7 +15,6 @@ tests/%.run: tests/%.s runtime/start.rs
 	ar rcs tests/lib$*.a tests/$*.o
 	rustc --target $(RUST_TARGET) -L tests/ -lour_code:$* runtime/start.rs -o tests/$*.run
 
-
 # Change below to whatever might be helpful! 
 MODE ?= -c
 
@@ -24,10 +23,9 @@ tests/%.s: tests/%.snek src/main.rs
 
 clean:
 	cargo clean
-	rm -f tests/*.a tests/*.s tests/*.run tests/*.o
+	rm -f tests/*.a tests/*.s tests/*.run tests/*.o runtime/*.o
 
 .PHONY: test
 test:
 	cargo build --target $(RUST_TARGET)
 	cargo test -- --test-threads=1
-
