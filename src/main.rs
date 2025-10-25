@@ -10,16 +10,6 @@ use std::io::{self, Write};
 use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi, DynamicLabel};
 
 
-#[no_mangle]
-pub extern "C" fn snek_error(errcode: i64) {
-    match errcode {
-        1 => eprintln!("invalid argument"),
-        2 => eprintln!("overflow"),
-        _ => eprintln!("an error occurred {}", errcode),
-    }
-    std::process::exit(1);
-}
-
 enum Op1 { Add1, 
     Sub1,
     IsNum, 
