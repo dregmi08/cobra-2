@@ -9,6 +9,15 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi, DynamicLabel};
 
+pub extern "C" fn snek_error(errcode: i64) {
+    match errcode {
+        1 => eprintln!("invalid argument"),
+        2 => eprintln!("overflow"),
+        _ => eprintln!("an error occurred {}", errcode),
+    }
+    std::process::exit(1);
+}
+
 
 enum Op1 { Add1, 
     Sub1,
@@ -724,6 +733,8 @@ fn is_set_in_expr(var_name: &str, expr: &Expr) -> bool {
 
 //Used CLAUDE to help refactor repl to look much cleaner
 //Prompt: Given this REPL code, could you refactor to look cleaner?
+
+
 fn repl(flag: &String) -> io::Result<()> {
     let mut define_env: HashMap<String, DefineValue> = HashMap::new();
 
@@ -821,7 +832,7 @@ fn repl(flag: &String) -> io::Result<()> {
 
         // Catch panics from compile_ops
         let compile_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            compile_ops(&expr, &mut ops, 2, &env, &define_env, None);
+            compile_ops_repl(&expr, &mut ops, 2, &env, &define_env, None);
             dynasm!(ops ; .arch x64 ; ret);
             ops.commit().unwrap();
             ops
@@ -843,6 +854,18 @@ fn repl(flag: &String) -> io::Result<()> {
         let buf = reader.lock();
         let jitted_fn: extern "C" fn() -> i64 = unsafe { mem::transmute(buf.ptr(start)) };
         let result = jitted_fn();
+
+        // Check for error markers from snek_error_repl
+        if result == -1 {
+            println!("invalid argument");
+            continue;
+        } else if result == -2 {
+            println!("overflow");
+            continue;
+        } else if result < 0 {
+            println!("an error occurred");
+            continue;
+        }
 
         // Update define environment based on result
         match expr {
@@ -878,6 +901,531 @@ fn repl(flag: &String) -> io::Result<()> {
         println!("{}", output);
     }
     Ok(())
+}
+
+// New REPL-specific error function that returns error codes instead of exiting
+#[no_mangle]
+pub extern "C" fn snek_error_repl(errcode: i64) -> i64 {
+    match errcode {
+        1 => -1,  // invalid argument marker
+        2 => -2,  // overflow marker
+        _ => -3,  // other error marker
+    }
+}
+
+// REPL-specific compile_ops that uses snek_error_repl
+fn compile_ops_repl(
+    e: &Expr,
+    ops: &mut dynasmrt::x64::Assembler,
+    si: i32,
+    env: &HashMap<String, i32>,
+    define_env: &HashMap<String, DefineValue>,
+    break_label: Option<dynasmrt::DynamicLabel>
+) {
+    match e {
+        Expr::Number(n) => {
+            let tagged = *n << 1;
+            dynasm!(ops ; .arch x64 ; mov rax, QWORD tagged as i64);
+        }
+        Expr::Boolean(b) => {
+            let val = if *b { 3 } else { 1 };
+            dynasm!(ops ; .arch x64 ; mov rax, QWORD val);
+        }
+        Expr::Id(name) => {
+            if let Some(stack_offset) = env.get(name) {
+                dynasm!(ops ; .arch x64 ; mov rax, [rsp - *stack_offset]);
+            } else if let Some(def_val) = define_env.get(name) {
+                match def_val {
+                    DefineValue::Known(val) => {
+                        dynasm!(ops ; .arch x64 ; mov rax, QWORD *val);
+                    }
+                    DefineValue::Unknown(ptr) => {
+                        let ptr_val = *ptr as i64;
+                        dynasm!(ops ; .arch x64
+                            ; mov r11, QWORD ptr_val
+                            ; mov rax, [r11]
+                        );
+                    }
+                }
+            } else if name == "input" {
+                dynasm!(ops ; .arch x64 ; mov rax, rdi);
+            } else {
+                panic!("Unbound variable identifier {}", name);
+            }
+        }
+        Expr::UnOp(Op1::Add1, e1) => {
+            if let Some(true) = get_static_type(e1, env, define_env) {
+                panic!("Invalid: invalid argument");
+            }
+
+            compile_ops_repl(e1, ops, si, env, define_env, break_label);
+            let error_label = ops.new_dynamic_label();
+            let ok_label = ops.new_dynamic_label();
+            let snek_error_addr = snek_error_repl as i64;
+            dynasm!(ops ; .arch x64
+                ; test rax, 1
+                ; jnz =>error_label
+                ; add rax, 2
+                ; jmp =>ok_label
+                ; =>error_label
+                ; mov rdi, 1
+                ; mov rax, QWORD snek_error_addr
+                ; call rax
+                ; ret
+                ; =>ok_label
+            );
+        }
+        Expr::UnOp(Op1::Sub1, e1) => {
+            if let Some(true) = get_static_type(e1, env, define_env) {
+                panic!("Invalid: invalid argument");
+            }
+
+            compile_ops_repl(e1, ops, si, env, define_env, break_label);
+            let error_label = ops.new_dynamic_label();
+            let ok_label = ops.new_dynamic_label();
+            let snek_error_addr = snek_error_repl as i64;
+            dynasm!(ops ; .arch x64
+                ; test rax, 1
+                ; jnz =>error_label
+                ; sub rax, 2
+                ; jmp =>ok_label
+                ; =>error_label
+                ; mov rdi, 1
+                ; mov rax, QWORD snek_error_addr
+                ; call rax
+                ; ret
+                ; =>ok_label
+            );
+        }
+        Expr::UnOp(Op1::IsNum, e1) => {
+            compile_ops_repl(e1, ops, si, env, define_env, break_label);
+            let stack_offset = si * 8;
+            dynasm!(ops ; .arch x64
+                ; test rax, 1
+                ; mov rax, 1
+                ; mov QWORD [rsp - stack_offset], 3
+                ; cmovz rax, [rsp - stack_offset]
+            );
+        }
+        Expr::UnOp(Op1::IsBool, e1) => {
+            compile_ops_repl(e1, ops, si, env, define_env, break_label);
+            let stack_offset = si * 8;
+            dynasm!(ops ; .arch x64
+                ; test rax, 1
+                ; mov rax, 1
+                ; mov QWORD [rsp - stack_offset], 3
+                ; cmovnz rax, [rsp - stack_offset]
+            );
+        }
+        Expr::BinOp(Op2::Plus, e1, e2) => {
+            if let Some(true) = get_static_type(e1, env, define_env) {
+                panic!("Invalid: invalid argument");
+            }
+            if let Some(true) = get_static_type(e2, env, define_env) {
+                panic!("Invalid: invalid argument");
+            }
+
+            compile_ops_repl(e1, ops, si, env, define_env, break_label);
+            let stack_offset = si * 8;
+            let type_error_label = ops.new_dynamic_label();
+            let overflow_label = ops.new_dynamic_label();
+            let ok_label = ops.new_dynamic_label();
+            let snek_error_addr = snek_error_repl as i64;
+
+            dynasm!(ops ; .arch x64
+                ; test rax, 1
+                ; jnz =>type_error_label
+                ; mov [rsp - stack_offset], rax
+            );
+
+            compile_ops_repl(e2, ops, si+1, env, define_env, break_label);
+
+            dynasm!(ops ; .arch x64
+                ; test rax, 1
+                ; jnz =>type_error_label
+                ; add rax, [rsp - stack_offset]
+                ; jo =>overflow_label
+                ; jmp =>ok_label
+                ; =>type_error_label
+                ; mov rdi, 1
+                ; mov rax, QWORD snek_error_addr
+                ; call rax
+                ; ret
+                ; =>overflow_label
+                ; mov rdi, 2
+                ; mov rax, QWORD snek_error_addr
+                ; call rax
+                ; ret
+                ; =>ok_label
+            );
+        }
+        Expr::BinOp(Op2::Minus, e1, e2) => {
+            if let Some(true) = get_static_type(e1, env, define_env) {
+                panic!("Invalid: invalid argument");
+            }
+            if let Some(true) = get_static_type(e2, env, define_env) {
+                panic!("Invalid: invalid argument");
+            }
+
+            compile_ops_repl(e1, ops, si, env, define_env, break_label);
+            let stack_offset = si * 8;
+            let stack_offset2 = (si + 1) * 8;
+            let type_error_label = ops.new_dynamic_label();
+            let overflow_label = ops.new_dynamic_label();
+            let ok_label = ops.new_dynamic_label();
+            let snek_error_addr = snek_error_repl as i64;
+
+            dynasm!(ops ; .arch x64
+                ; test rax, 1
+                ; jnz =>type_error_label
+                ; mov [rsp - stack_offset], rax
+            );
+
+            compile_ops_repl(e2, ops, si+1, env, define_env, break_label);
+
+            dynasm!(ops ; .arch x64
+                ; test rax, 1
+                ; jnz =>type_error_label
+                ; mov [rsp - stack_offset2], rax
+                ; mov rax, [rsp - stack_offset]
+                ; sub rax, [rsp - stack_offset2]
+                ; jo =>overflow_label
+                ; jmp =>ok_label
+                ; =>type_error_label
+                ; mov rdi, 1
+                ; mov rax, QWORD snek_error_addr
+                ; call rax
+                ; ret
+                ; =>overflow_label
+                ; mov rdi, 2
+                ; mov rax, QWORD snek_error_addr
+                ; call rax
+                ; ret
+                ; =>ok_label
+            );
+        }
+        Expr::BinOp(Op2::Times, e1, e2) => {
+            if let Some(true) = get_static_type(e1, env, define_env) {
+                panic!("Invalid: invalid argument");
+            }
+            if let Some(true) = get_static_type(e2, env, define_env) {
+                panic!("Invalid: invalid argument");
+            }
+
+            compile_ops_repl(e1, ops, si, env, define_env, break_label);
+            let stack_offset = si * 8;
+            let type_error_label = ops.new_dynamic_label();
+            let overflow_label = ops.new_dynamic_label();
+            let ok_label = ops.new_dynamic_label();
+            let snek_error_addr = snek_error_repl as i64;
+
+            dynasm!(ops ; .arch x64
+                ; test rax, 1
+                ; jnz =>type_error_label
+                ; mov [rsp - stack_offset], rax
+            );
+
+            compile_ops_repl(e2, ops, si+1, env, define_env, break_label);
+
+            dynasm!(ops ; .arch x64
+                ; test rax, 1
+                ; jnz =>type_error_label
+                ; sar rax, 1
+                ; imul rax, [rsp - stack_offset]
+                ; jo =>overflow_label
+                ; jmp =>ok_label
+                ; =>type_error_label
+                ; mov rdi, 1
+                ; mov rax, QWORD snek_error_addr
+                ; call rax
+                ; ret
+                ; =>overflow_label
+                ; mov rdi, 2
+                ; mov rax, QWORD snek_error_addr
+                ; call rax
+                ; ret
+                ; =>ok_label
+            );
+        }
+        Expr::BinOp(Op2::Equal, e1, e2) => {
+            let type1 = get_static_type(e1, env, define_env);
+            let type2 = get_static_type(e2, env, define_env);
+
+            if let (Some(t1), Some(t2)) = (type1, type2) {
+                if t1 != t2 {
+                    panic!("Invalid: invalid argument");
+                }
+            }
+
+            compile_ops_repl(e1, ops, si, env, define_env, break_label);
+            let stack_offset = si * 8;
+            dynasm!(ops ; .arch x64 ; mov [rsp - stack_offset], rax);
+            compile_ops_repl(e2, ops, si+1, env, define_env, break_label);
+
+            let error_label = ops.new_dynamic_label();
+            let ok_label = ops.new_dynamic_label();
+            let stack_offset2 = (si + 1) * 8;
+            let snek_error_addr = snek_error_repl as i64;
+            dynasm!(ops ; .arch x64
+                ; mov [rsp - stack_offset2], rax
+                ; xor rax, [rsp - stack_offset]
+                ; test rax, 1
+                ; jnz =>error_label
+                ; mov rax, [rsp - stack_offset2]
+                ; cmp rax, [rsp - stack_offset]
+                ; mov rax, 1
+                ; mov QWORD [rsp - stack_offset], 3
+                ; cmove rax, [rsp - stack_offset]
+                ; jmp =>ok_label
+                ; =>error_label
+                ; mov rdi, 1
+                ; mov rax, QWORD snek_error_addr
+                ; call rax
+                ; ret
+                ; =>ok_label
+            );
+        }
+        Expr::BinOp(Op2::Greater, e1, e2) => {
+            if let Some(true) = get_static_type(e1, env, define_env) {
+                panic!("Invalid: invalid argument");
+            }
+            if let Some(true) = get_static_type(e2, env, define_env) {
+                panic!("Invalid: invalid argument");
+            }
+
+            compile_ops_repl(e1, ops, si, env, define_env, break_label);
+            let stack_offset = si * 8;
+            let stack_offset2 = (si + 1) * 8;
+            let error_label = ops.new_dynamic_label();
+            let snek_error_addr = snek_error_repl as i64;
+
+            dynasm!(ops ; .arch x64
+                ; test rax, 1
+                ; jnz =>error_label
+                ; mov [rsp - stack_offset], rax
+            );
+
+            compile_ops_repl(e2, ops, si+1, env, define_env, break_label);
+
+            let ok_label = ops.new_dynamic_label();
+            dynasm!(ops ; .arch x64
+                ; test rax, 1
+                ; jnz =>error_label
+                ; mov [rsp - stack_offset2], rax
+                ; mov rax, [rsp - stack_offset]
+                ; cmp rax, [rsp - stack_offset2]
+                ; mov rax, 1
+                ; mov QWORD [rsp - stack_offset], 3
+                ; cmovg rax, [rsp - stack_offset]
+                ; jmp =>ok_label
+                ; =>error_label
+                ; mov rdi, 1
+                ; mov rax, QWORD snek_error_addr
+                ; call rax
+                ; ret
+                ; =>ok_label
+            );
+        }
+        Expr::BinOp(Op2::GreaterEqual, e1, e2) => {
+            if let Some(true) = get_static_type(e1, env, define_env) {
+                panic!("Invalid: invalid argument");
+            }
+            if let Some(true) = get_static_type(e2, env, define_env) {
+                panic!("Invalid: invalid argument");
+            }
+
+            compile_ops_repl(e1, ops, si, env, define_env, break_label);
+            let stack_offset = si * 8;
+            let stack_offset2 = (si + 1) * 8;
+            let error_label = ops.new_dynamic_label();
+            let snek_error_addr = snek_error_repl as i64;
+
+            dynasm!(ops ; .arch x64
+                ; test rax, 1
+                ; jnz =>error_label
+                ; mov [rsp - stack_offset], rax
+            );
+
+            compile_ops_repl(e2, ops, si+1, env, define_env, break_label);
+
+            let ok_label = ops.new_dynamic_label();
+            dynasm!(ops ; .arch x64
+                ; test rax, 1
+                ; jnz =>error_label
+                ; mov [rsp - stack_offset2], rax
+                ; mov rax, [rsp - stack_offset]
+                ; cmp rax, [rsp - stack_offset2]
+                ; mov rax, 1
+                ; mov QWORD [rsp - stack_offset], 3
+                ; cmovge rax, [rsp - stack_offset]
+                ; jmp =>ok_label
+                ; =>error_label
+                ; mov rdi, 1
+                ; mov rax, QWORD snek_error_addr
+                ; call rax
+                ; ret
+                ; =>ok_label
+            );
+        }
+        Expr::BinOp(Op2::Less, e1, e2) => {
+            if let Some(true) = get_static_type(e1, env, define_env) {
+                panic!("Invalid: invalid argument");
+            }
+            if let Some(true) = get_static_type(e2, env, define_env) {
+                panic!("Invalid: invalid argument");
+            }
+
+            compile_ops_repl(e1, ops, si, env, define_env, break_label);
+            let stack_offset = si * 8;
+            let stack_offset2 = (si + 1) * 8;
+            let error_label = ops.new_dynamic_label();
+            let snek_error_addr = snek_error_repl as i64;
+
+            dynasm!(ops ; .arch x64
+                ; test rax, 1
+                ; jnz =>error_label
+                ; mov [rsp - stack_offset], rax
+            );
+
+            compile_ops_repl(e2, ops, si+1, env, define_env, break_label);
+
+            let ok_label = ops.new_dynamic_label();
+            dynasm!(ops ; .arch x64
+                ; test rax, 1
+                ; jnz =>error_label
+                ; mov [rsp - stack_offset2], rax
+                ; mov rax, [rsp - stack_offset]
+                ; cmp rax, [rsp - stack_offset2]
+                ; mov rax, 1
+                ; mov QWORD [rsp - stack_offset], 3
+                ; cmovl rax, [rsp - stack_offset]
+                ; jmp =>ok_label
+                ; =>error_label
+                ; mov rdi, 1
+                ; mov rax, QWORD snek_error_addr
+                ; call rax
+                ; ret
+                ; =>ok_label
+            );
+        }
+        Expr::BinOp(Op2::LessEqual, e1, e2) => {
+            if let Some(true) = get_static_type(e1, env, define_env) {
+                panic!("Invalid: invalid argument");
+            }
+            if let Some(true) = get_static_type(e2, env, define_env) {
+                panic!("Invalid: invalid argument");
+            }
+
+            compile_ops_repl(e1, ops, si, env, define_env, break_label);
+            let stack_offset = si * 8;
+            let stack_offset2 = (si + 1) * 8;
+            let error_label = ops.new_dynamic_label();
+            let snek_error_addr = snek_error_repl as i64;
+
+            dynasm!(ops ; .arch x64
+                ; test rax, 1
+                ; jnz =>error_label
+                ; mov [rsp - stack_offset], rax
+            );
+
+            compile_ops_repl(e2, ops, si+1, env, define_env, break_label);
+
+            let ok_label = ops.new_dynamic_label();
+            dynasm!(ops ; .arch x64
+                ; test rax, 1
+                ; jnz =>error_label
+                ; mov [rsp - stack_offset2], rax
+                ; mov rax, [rsp - stack_offset]
+                ; cmp rax, [rsp - stack_offset2]
+                ; mov rax, 1
+                ; mov QWORD [rsp - stack_offset], 3
+                ; cmovle rax, [rsp - stack_offset]
+                ; jmp =>ok_label
+                ; =>error_label
+                ; mov rdi, 1
+                ; mov rax, QWORD snek_error_addr
+                ; call rax
+                ; ret
+                ; =>ok_label
+            );
+        }
+        Expr::Let(bindings_vec, body) => {
+            let mut new_env = env.clone();
+            let mut current_si = si;
+
+            for (var_name, binding_expr) in bindings_vec {
+                compile_ops_repl(binding_expr, ops, current_si, &new_env, define_env, break_label);
+                let stack_offset = current_si * 8;
+                dynasm!(ops ; .arch x64 ; mov [rsp - stack_offset], rax);
+                new_env.insert(var_name.clone(), stack_offset);
+                current_si += 1;
+            }
+
+            compile_ops_repl(body, ops, current_si, &new_env, define_env, break_label);
+        }
+        Expr::Define(var, expr) => {
+            compile_ops_repl(expr, ops, si, env, define_env, break_label);
+        }
+        Expr::Loop(expr) => {
+            let start_label = ops.new_dynamic_label();
+            let end_label = ops.new_dynamic_label();
+            dynasm!(ops ; .arch x64 ; =>start_label);
+            compile_ops_repl(expr, ops, si, env, define_env, Some(end_label));
+            dynasm!(ops ; .arch x64
+                ; jmp =>start_label
+                ; =>end_label
+            );
+        }
+        Expr::If(cond, true_code, false_code) => {
+            compile_ops_repl(cond, ops, si, env, define_env, break_label);
+            let false_label = ops.new_dynamic_label();
+            let done_label = ops.new_dynamic_label();
+            dynasm!(ops ; .arch x64
+                ; cmp rax, 1
+                ; je =>false_label
+            );
+            compile_ops_repl(true_code, ops, si, env, define_env, break_label);
+            dynasm!(ops ; .arch x64 ; jmp =>done_label);
+            dynasm!(ops ; .arch x64 ; =>false_label);
+            compile_ops_repl(false_code, ops, si, env, define_env, break_label);
+            dynasm!(ops ; .arch x64 ; =>done_label);
+        }
+        Expr::Break(expr) => {
+            compile_ops_repl(expr, ops, si, env, define_env, break_label);
+            if let Some(label) = break_label {
+                dynasm!(ops ; .arch x64 ; jmp =>label);
+            } else {
+                panic!("Invalid: break outside of loop");
+            }
+        }
+        Expr::Block(vec) => {
+            for item in vec.iter() {
+                compile_ops_repl(item, ops, si, env, define_env, break_label);
+            }
+        }
+        Expr::Set(name, e) => {
+            compile_ops_repl(e, ops, si, env, define_env, break_label);
+
+            if let Some(stack_offset) = env.get(name) {
+                dynasm!(ops ; .arch x64 ; mov [rsp - *stack_offset], rax);
+            } else if let Some(def_val) = define_env.get(name) {
+                match def_val {
+                    DefineValue::Unknown(ptr) => {
+                        let ptr_val = *ptr as i64;
+                        dynasm!(ops ; .arch x64
+                            ; mov r11, QWORD ptr_val
+                            ; mov [r11], rax
+                        );
+                    }
+                    DefineValue::Known(_) => {
+                        panic!("Cannot set! a define'd variable that wasn't detected as mutable");
+                    }
+                }
+            } else {
+                panic!("Unbound variable identifier {}", name);
+            }
+        }
+    }
 }
 
 //CLAUDE USAGE: Used Claude to reformat function to check if types in binop are the same
@@ -1018,12 +1566,14 @@ fn compile_ops(
 
             compile_ops(e1, ops, si, env, define_env, break_label);
             let stack_offset = si * 8;
-            let error_label = ops.new_dynamic_label();
+            let type_error_label = ops.new_dynamic_label();
+            let overflow_label = ops.new_dynamic_label();
+            let ok_label = ops.new_dynamic_label();
             let snek_error_addr = snek_error as i64;
 
             dynasm!(ops ; .arch x64
                 ; test rax, 1
-                ; jnz =>error_label
+                ; jnz =>type_error_label
                 ; mov [rsp - stack_offset], rax
             );
 
@@ -1031,15 +1581,16 @@ fn compile_ops(
 
             dynasm!(ops ; .arch x64
                 ; test rax, 1
-                ; jnz =>error_label
+                ; jnz =>type_error_label
                 ; add rax, [rsp - stack_offset]
-            );
-
-            let ok_label = ops.new_dynamic_label();
-            dynasm!(ops ; .arch x64
+                ; jo =>overflow_label
                 ; jmp =>ok_label
-                ; =>error_label
+                ; =>type_error_label
                 ; mov rdi, 1
+                ; mov rax, QWORD snek_error_addr
+                ; call rax
+                ; =>overflow_label
+                ; mov rdi, 2
                 ; mov rax, QWORD snek_error_addr
                 ; call rax
                 ; =>ok_label
@@ -1057,12 +1608,14 @@ fn compile_ops(
             compile_ops(e1, ops, si, env, define_env, break_label);
             let stack_offset = si * 8;
             let stack_offset2 = (si + 1) * 8;
-            let error_label = ops.new_dynamic_label();
+            let type_error_label = ops.new_dynamic_label();
+            let overflow_label = ops.new_dynamic_label();
+            let ok_label = ops.new_dynamic_label();
             let snek_error_addr = snek_error as i64;
 
             dynasm!(ops ; .arch x64
                 ; test rax, 1
-                ; jnz =>error_label
+                ; jnz =>type_error_label
                 ; mov [rsp - stack_offset], rax
             );
 
@@ -1070,17 +1623,18 @@ fn compile_ops(
 
             dynasm!(ops ; .arch x64
                 ; test rax, 1
-                ; jnz =>error_label
+                ; jnz =>type_error_label
                 ; mov [rsp - stack_offset2], rax
                 ; mov rax, [rsp - stack_offset]
                 ; sub rax, [rsp - stack_offset2]
-            );
-
-            let ok_label = ops.new_dynamic_label();
-            dynasm!(ops ; .arch x64
+                ; jo =>overflow_label
                 ; jmp =>ok_label
-                ; =>error_label
+                ; =>type_error_label
                 ; mov rdi, 1
+                ; mov rax, QWORD snek_error_addr
+                ; call rax
+                ; =>overflow_label
+                ; mov rdi, 2
                 ; mov rax, QWORD snek_error_addr
                 ; call rax
                 ; =>ok_label
